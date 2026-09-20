@@ -19,9 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      DATA_ROOT_DIRECTORY: ${{ runner.temp }}/rss-data
-      SYSTEM_ROOT_DIRECTORY: ${{ runner.temp }}/rss-system
-      CACHE_ROOT_DIRECTORY: ${{ runner.temp }}/rss-cache
       TELEMETRY_DISABLED: '1'
       RUNTIME__DLTHUB_TELEMETRY: 'false'
     steps:
@@ -34,4 +31,8 @@ jobs:
       - name: Install connector and test dependencies
         run: python -m pip install -e ./packages/connector/rss pytest
       - name: Test parsing and snapshot preservation with local fixtures
+        env:
+          DATA_ROOT_DIRECTORY: ${{ runner.temp }}/rss-data
+          SYSTEM_ROOT_DIRECTORY: ${{ runner.temp }}/rss-system
+          CACHE_ROOT_DIRECTORY: ${{ runner.temp }}/rss-cache
         run: python -m pytest packages/connector/rss/tests -q
