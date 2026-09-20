@@ -288,3 +288,57 @@ def test_dropped_entry_is_removed_on_resync(dlt_mod, tmp_path):
     rows = _read_entries(pipeline)
     assert "g1" not in rows
     assert "g2" in rows
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"<html><body>Service unavailable</body></html>",
+        b"<response><error>Unavailable</error></response>",
+    ],
+    ids=["empty-body", "html-error-page", "xml-error-page"],
+)
+def test_iter_entries_rejects_non_feed_responses(body):
+    with pytest.raises(ValueError, match="not a recognized RSS/Atom feed"):
+        list(_iter_entries(FEED_URL, FakeFetcher({FEED_URL: body})))
+
+
+@pytest.mark.parametrize("feed", [_rss_feed([]), _atom_feed([])], ids=["rss", "atom"])
+def test_iter_entries_accepts_recognized_empty_feeds(feed):
+    assert list(_iter_entries(FEED_URL, FakeFetcher({FEED_URL: feed}))) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"<html><body>Service unavailable</body></html>",
+        b"<response><error>Unavailable</error></response>",
+    ],
+    ids=["empty-body", "html-error-page", "xml-error-page"],
+)
+def test_invalid_feed_aborts_resync_without_replacing_existing_rows(dlt_mod, tmp_path, body):
+    from dlt.pipeline.exceptions import PipelineStepFailed
+
+    other_url = "https://example.com/other.xml"
+    feeds = {
+        FEED_URL: _rss_feed([("g1", "One", "https://x/1", "original first")]),
+        other_url: _rss_feed([("g2", "Two", "https://x/2", "original second")]),
+    }
+    pipeline = _run_sync(dlt_mod, tmp_path, feeds)
+    original_rows = _read_entries(pipeline)
+    assert set(original_rows) == {"g1", "g2"}
+
+    # The healthy feed is processed first, then an upstream error page arrives
+    # with HTTP 200. This must abort the full snapshot, preserving both feeds.
+    with pytest.raises(PipelineStepFailed, match="not a recognized RSS/Atom feed"):
+        _run_sync(
+            dlt_mod,
+            tmp_path,
+            {
+                other_url: _rss_feed([("g2", "Two", "https://x/2", "changed second")]),
+                FEED_URL: body,
+            },
+        )
+    assert _read_entries(pipeline) == original_rows

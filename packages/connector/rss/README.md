@@ -58,8 +58,10 @@ exactly the entries currently present in the configured feeds on each run.
   (429 / 5xx / timeout / network) are retried with backoff.
 
 Both RSS and Atom are supported, and malformed feeds are parsed leniently (feedparser): a
-feed that still yields entries is used with a warning; one that yields nothing is treated as
-a failed fetch.
+recognized feed that still yields entries is used with a warning; a malformed feed that
+yields nothing is treated as a failed fetch. Empty response bodies and HTML/XML error pages
+also abort the snapshot, even if the server returns HTTP 200. Valid empty RSS/Atom feeds
+remain accepted, so intentional upstream deletions can still be reconciled.
 
 ## Testing
 

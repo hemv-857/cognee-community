@@ -201,14 +201,16 @@ def _retry_after(headers: Any, attempt: int) -> float:
 def _iter_entries(url: str, fetch: Callable[[str], bytes]):
     """Yield document rows for one feed's entries.
 
-    feedparser sets ``bozo`` on a malformed feed but still parses what it can, so
-    a feed that yields entries is used (with a warning). A feed that yields *no*
-    entries and is malformed is treated as a failed fetch and raises — under
-    replace, committing an empty snapshot would forget every live entry.
+    Require a recognized RSS/Atom format before accepting an empty result.
+    feedparser can parse an HTML/XML error page without setting ``bozo``; that
+    response is not an authoritative empty feed. Malformed recognized feeds
+    that still yield entries are used with a warning.
     """
     import feedparser
 
     parsed = feedparser.parse(fetch(url))
+    if not parsed.get("version", "").startswith(("rss", "atom")):
+        raise ValueError(f"RSS: response from {url} is not a recognized RSS/Atom feed")
     if getattr(parsed, "bozo", 0) and not parsed.entries:
         raise ValueError(f"RSS: feed {url} could not be parsed: {parsed.get('bozo_exception')}")
     if getattr(parsed, "bozo", 0):
