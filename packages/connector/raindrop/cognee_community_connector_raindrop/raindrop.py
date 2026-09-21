@@ -127,37 +127,40 @@ def _is_transient(exc: Exception) -> bool:
 
 
 def _paginate(client, method: str, path: str, **kwargs) -> list[dict]:
-    """Paginate through Raindrop.io's collection endpoint.
+    """Paginate through a Raindrop.io endpoint.
 
-    Raindrop.io uses skip/limit pagination: skip increments by collection count
-    per page, and the loop stops when returned count < per_page or items are empty.
+    Raindrop.io uses page-based pagination: page increments from 0, and the
+    loop stops when the returned items list is empty or shorter than per_page.
     """
-    skip = 0
+    page = 0
     per_page = 50  # max allowed by Raindrop.io API
     all_items = []
     while True:
-        data = _request(client, method, path, params={**kwargs, "skip": skip, "perpage": per_page})
+        data = _request(client, method, path, params={**kwargs, "page": page, "perpage": per_page})
         items = data.get("items", [])
         all_items.extend(items)
         if len(items) < per_page:
             break
-        skip += per_page
+        page += 1
     return all_items
 
 
 def _iter_bookmarks(client, collection_ids: list[int] | None = None):
     """Yield bookmark dicts from Raindrop.io.
 
-    If collection_ids is provided, only bookmarks from those collections are
-    fetched. Otherwise, all collections are scanned.
+    When collection_ids is None, uses the /raindrops/0 all-bookmarks endpoint
+    which returns every bookmark across all collections (including nested and
+    system collections like Unsorted). When collection_ids is provided, only
+    bookmarks from those specific collections are fetched.
     """
     if collection_ids is None:
-        collections_data = _request(client, "get", f"{_API_PREFIX}/collections")
-        collection_ids = [c["id"] for c in collections_data.get("items", [])]
-
-    for cid in collection_ids:
-        bookmarks = _paginate(client, "get", f"{_API_PREFIX}/raindrops/{cid}")
+        # /raindrops/0 returns all bookmarks regardless of collection
+        bookmarks = _paginate(client, "get", f"{_API_PREFIX}/raindrops/0")
         yield from bookmarks
+    else:
+        for cid in collection_ids:
+            bookmarks = _paginate(client, "get", f"{_API_PREFIX}/raindrops/{cid}")
+            yield from bookmarks
 
 
 def _bookmark_to_row(bookmark: dict) -> dict:

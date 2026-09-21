@@ -33,7 +33,8 @@ from cognee_community_connector_raindrop import raindrop_source
 
 async def main():
     source = raindrop_source()
-    await cognee.add(source)
+    # max_rows_per_table=0 is required for full-snapshot sync (default is 50)
+    await cognee.add(source, max_rows_per_table=0)
 
     results = await cognee.search(query_text="machine learning")
     for result in results:

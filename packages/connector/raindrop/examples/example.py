@@ -21,7 +21,7 @@ async def main():
     # Alternative: pass token directly or restrict to specific collections
     # source = raindrop_source(token="...", collection_ids=[123456, 789012])
 
-    await cognee.add(source)
+    await cognee.add(source, max_rows_per_table=0)
 
     # Query your synced bookmarks
     results = await cognee.search(query_text="machine learning")

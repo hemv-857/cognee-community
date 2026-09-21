@@ -46,23 +46,24 @@ class FakeRaindropClient:
 
     def __init__(self, bookmarks, collections=None):
         self._bookmarks = bookmarks
-        self._collections = collections or [{"id": 1, "title": "All"}]
         self._call_count = 0
 
     def get(self, path, params=None):
         self._call_count += 1
         params = params or {}
 
-        if path == "/rest/v1/collections":
-            return self._json_response({"items": self._collections})
-
         if path.startswith("/rest/v1/raindrops/"):
             cid = int(path.split("/")[-1])
-            items = [b for b in self._bookmarks if b["collection"]["id"] == cid]
-            skip = params.get("skip", 0)
+            if cid == 0:
+                # /raindrops/0 returns all bookmarks
+                items = list(self._bookmarks)
+            else:
+                items = [b for b in self._bookmarks if b["collection"]["id"] == cid]
+            page = params.get("page", 0)
             per_page = params.get("perpage", 50)
-            page = items[skip : skip + per_page]
-            return self._json_response({"items": page})
+            start = page * per_page
+            page_items = items[start : start + per_page]
+            return self._json_response({"items": page_items})
 
         return self._json_response({"items": []})
 
@@ -141,12 +142,12 @@ def test_paginate_stops_when_empty():
 # ---------------------------------------------------------------------------
 
 
-def test_iter_bookmarks_fetches_all_collections():
+def test_iter_bookmarks_fetches_all_when_no_collection_ids():
     bookmarks = [
         _bookmark(1, "A", collection_id=1),
         _bookmark(2, "B", collection_id=2),
     ]
-    client = FakeRaindropClient(bookmarks, collections=[{"id": 1}, {"id": 2}])
+    client = FakeRaindropClient(bookmarks)
     result = list(_iter_bookmarks(client))
     assert len(result) == 2
 
@@ -203,7 +204,7 @@ def test_raindrop_source_declares_document_marker():
 # ---------------------------------------------------------------------------
 
 
-def _run_sync(dlt, tmp_path, bookmarks, collections=None):
+def _run_sync(dlt, tmp_path, bookmarks, collection_ids=None):
     """Run raindrop_source through a dlt pipeline into a temp sqlite destination."""
     from cognee_community_connector_raindrop.raindrop import raindrop_source
 
@@ -214,8 +215,8 @@ def _run_sync(dlt, tmp_path, bookmarks, collections=None):
         dataset_name="raindrop_ds",
         pipelines_dir=str(tmp_path / "state"),
     )
-    client = FakeRaindropClient(bookmarks, collections)
-    pipeline.run(raindrop_source(client=client))
+    client = FakeRaindropClient(bookmarks)
+    pipeline.run(raindrop_source(client=client, collection_ids=collection_ids))
     return pipeline
 
 
@@ -267,13 +268,13 @@ def test_deleted_bookmark_is_removed_on_resync(dlt_mod, tmp_path):
     assert "2" in rows
 
 
-def test_multiple_collections_are_merged(dlt_mod, tmp_path):
+def test_multiple_collections_are_fetched_separately(dlt_mod, tmp_path):
     bookmarks = [
         _bookmark(1, "A", collection_id=1),
         _bookmark(2, "B", collection_id=2),
     ]
-    collections = [{"id": 1}, {"id": 2}]
-    pipeline = _run_sync(dlt_mod, tmp_path, bookmarks, collections)
+    # When collection_ids is provided, each collection is fetched separately
+    pipeline = _run_sync(dlt_mod, tmp_path, bookmarks, collection_ids=[1, 2])
 
     rows = _read_bookmarks(pipeline)
     assert set(rows) == {"1", "2"}
