@@ -44,7 +44,7 @@ def _bookmark(bookmark_id, title, link="https://example.com", excerpt="", note="
 class FakeRaindropClient:
     """Stand-in for httpx.Client backed by in-memory fixtures."""
 
-    def __init__(self, bookmarks, collections=None):
+    def __init__(self, bookmarks):
         self._bookmarks = bookmarks
         self._call_count = 0
 
