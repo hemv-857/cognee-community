@@ -3,7 +3,7 @@ name = "cognee-community-connector-raindrop"
 version = "0.1.0"
 description = "Raindrop.io data-source connector for cognee — sync your bookmarks into memory (full snapshot + forget-on-delete)"
 readme = "README.md"
-requires-python = ">=3.11,<=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "cognee==1.4.0",
     "dlt[sqlalchemy]>=1.9.0,<2",
