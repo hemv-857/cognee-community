@@ -7,7 +7,7 @@ requires-python = ">=3.11,<=3.13"
 dependencies = [
     # Requires cognee "document-mode" (DOCUMENT_SOURCE_ATTR + resolve_dlt_sources
     # routing), first shipped in cognee 1.4.0.
-    "cognee==1.4.0",
+    "cognee>=1.5.4,<1.7",
     "dlt[sqlalchemy]>=1.9.0,<2",
     "google-api-python-client>=2.100.0,<3",
     "google-auth>=2.23.0,<3",

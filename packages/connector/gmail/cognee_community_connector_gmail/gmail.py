@@ -63,6 +63,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from cognee.shared.logging_utils import get_logger
+from cognee.tasks.ingestion.dlt_utils import DOCUMENT_SOURCE_ATTR
 
 logger = get_logger("gmail_connector")
 
@@ -126,6 +127,17 @@ def build_gmail_service(
         os.chmod(token_path, 0o600)  # tighten a pre-existing token file too
 
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def build_gmail_service_from_access_token(access_token: str) -> Any:
+    """Build a Gmail client from a short-lived token supplied by a host."""
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError('The Gmail connector requires the "gmail" extra.') from exc
+    credentials = Credentials(token=access_token, scopes=[GMAIL_READONLY_SCOPE])
+    return build("gmail", "v1", credentials=credentials, cache_discovery=False)
 
 
 # ---------------------------------------------------------------------------
@@ -489,4 +501,9 @@ def gmail_source(
                 max_results=max_results,
             )
 
-    return gmail_messages
+    resource = gmail_messages()
+    # Gmail rows are prose documents, not a relational manifest. Without this
+    # marker Cognee would ingest the DLT table as one structured object and
+    # never run normal document cognification or orphan cleanup.
+    setattr(resource, DOCUMENT_SOURCE_ATTR, "gmail")
+    return resource

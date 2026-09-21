@@ -140,6 +140,24 @@ def build_drive_service(
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
+def build_drive_service_from_access_token(access_token: str) -> Any:
+    """Build a Drive client from a short-lived token supplied by a host.
+
+    Cloud hosts keep refresh tokens in their control plane and pass only an
+    access token to the ingestion worker. This helper deliberately does not
+    persist the token or attempt an interactive OAuth flow.
+    """
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError(
+            'The Google Drive connector requires the "google-drive" extra.'
+        ) from exc
+    credentials = Credentials(token=access_token, scopes=DRIVE_READONLY_SCOPES)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
 # The first three parameters are injected google-auth classes (dependency
 # injection for testability); classmethods are called on them below.
 def _load_oauth_credentials(
