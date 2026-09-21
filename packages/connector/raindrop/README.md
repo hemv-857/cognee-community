@@ -15,7 +15,7 @@ Sync your [Raindrop.io](https://raindrop.io/) bookmarks into cognee's memory gra
 2. Install the connector:
 
 ```bash
-pip install "cognee[raindrop]"
+pip install cognee-community-connector-raindrop
 ```
 
 3. Set your token:
@@ -32,10 +32,10 @@ import cognee
 from cognee_community_connector_raindrop import raindrop_source
 
 async def main():
-    source = raindrop_source(token="your-test-token-here")
+    source = raindrop_source()
     await cognee.add(source)
 
-    results = await cognee.search("search", query_text="machine learning")
+    results = await cognee.search(query_text="machine learning")
     for result in results:
         print(result)
 
@@ -46,10 +46,7 @@ asyncio.run(main())
 
 ```python
 # Only sync specific collections
-source = raindrop_source(
-    token="your-token",
-    collection_ids=[123456, 789012]
-)
+source = raindrop_source(collection_ids=[123456, 789012])
 ```
 
 ## How it works
@@ -63,8 +60,8 @@ source = raindrop_source(
 
 ```bash
 cd packages/connector/raindrop
-pip install -e ".[dev]"
-pytest
+pip install -e .
+pytest tests/
 ```
 
 ## License

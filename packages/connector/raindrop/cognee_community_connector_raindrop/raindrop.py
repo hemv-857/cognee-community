@@ -1,7 +1,7 @@
 """DLT source for Raindrop.io bookmarks (full-snapshot sync + forget-on-delete).
 
-Fetches bookmarks and their highlights/notes from Raindrop.io, yielding them as
-a dlt resource for cognee's ingestion pipeline.
+Fetches bookmarks (title, URL, excerpt, notes, tags) from Raindrop.io, yielding
+them as a dlt resource for cognee's ingestion pipeline.
 
 Like the Notion connector, Raindrop.io bookmarks are ingested as *normal
 documents*: the source declares ``cognee_document_source = "raindrop"``, so
@@ -27,13 +27,14 @@ logger = get_logger("raindrop_connector")
 
 RAINDROP_TABLE_NAME = "raindrop_bookmarks"
 RAINDROP_SOURCE_NAME = "raindrop"
-_API_BASE = "https://api.raindrop.io/rest/v1"
+_API_ROOT = "https://api.raindrop.io"
+_API_PREFIX = "/rest/v1"
 
 _MAX_RETRIES = 5
 
 _EXTRA_HINT = (
-    'The Raindrop.io connector requires the "raindrop" extra: '
-    'pip install "cognee[raindrop]" (provides dlt and httpx).'
+    "The Raindrop.io connector requires the cognee-community-connector-raindrop package: "
+    "pip install cognee-community-connector-raindrop"
 )
 
 
@@ -69,7 +70,7 @@ def raindrop_source(
         import httpx
 
         client = httpx.Client(
-            base_url=_API_BASE,
+            base_url=_API_ROOT,
             headers={"Authorization": f"Bearer {resolved_token}"},
             timeout=30.0,
         )
@@ -151,11 +152,11 @@ def _iter_bookmarks(client, collection_ids: list[int] | None = None):
     fetched. Otherwise, all collections are scanned.
     """
     if collection_ids is None:
-        collections_data = _request(client, "get", "/collections")
+        collections_data = _request(client, "get", f"{_API_PREFIX}/collections")
         collection_ids = [c["id"] for c in collections_data.get("items", [])]
 
     for cid in collection_ids:
-        bookmarks = _paginate(client, "get", f"/raindrops/{cid}")
+        bookmarks = _paginate(client, "get", f"{_API_PREFIX}/raindrops/{cid}")
         yield from bookmarks
 
 

@@ -14,20 +14,17 @@ from cognee_community_connector_raindrop import raindrop_source
 
 
 async def main():
-    # Reset cognee state (optional — for a clean slate)
-    # await cognee.prune.prune_data()
-
     # Add Raindrop.io bookmarks via the connector.
-    # All bookmarks from all collections will be synced.
-    source = raindrop_source(token="your-test-token-here")
+    # Token is read from RAINDROP_TOKEN env var when not passed explicitly.
+    source = raindrop_source()
 
-    # Alternative: restrict to specific collections
+    # Alternative: pass token directly or restrict to specific collections
     # source = raindrop_source(token="...", collection_ids=[123456, 789012])
 
     await cognee.add(source)
 
     # Query your synced bookmarks
-    results = await cognee.search("search", query_text="machine learning")
+    results = await cognee.search(query_text="machine learning")
     for result in results:
         print(result)
 

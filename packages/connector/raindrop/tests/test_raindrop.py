@@ -53,10 +53,10 @@ class FakeRaindropClient:
         self._call_count += 1
         params = params or {}
 
-        if path == "/collections":
+        if path == "/rest/v1/collections":
             return self._json_response({"items": self._collections})
 
-        if path.startswith("/raindrops/"):
+        if path.startswith("/rest/v1/raindrops/"):
             cid = int(path.split("/")[-1])
             items = [b for b in self._bookmarks if b["collection"]["id"] == cid]
             skip = params.get("skip", 0)
@@ -123,7 +123,7 @@ def test_bookmark_to_row_handles_missing_fields():
 def test_paginate_follows_cursor():
     bookmarks = [_bookmark(i, f"Book {i}") for i in range(120)]
     client = FakeRaindropClient(bookmarks)
-    result = _paginate(client, "get", "/raindrops/1")
+    result = _paginate(client, "get", "/rest/v1/raindrops/1")
     assert len(result) == 120
     # 120 items at per_page=50 means 3 API calls
     assert client._call_count == 3
@@ -131,7 +131,7 @@ def test_paginate_follows_cursor():
 
 def test_paginate_stops_when_empty():
     client = FakeRaindropClient([])
-    result = _paginate(client, "get", "/raindrops/1")
+    result = _paginate(client, "get", "/rest/v1/raindrops/1")
     assert len(result) == 0
     assert client._call_count == 1
 
@@ -287,13 +287,12 @@ def test_error_is_transient_classification():
     assert _is_transient(httpx.ReadTimeout("t")) is True
     assert _is_transient(httpx.ConnectError("conn refused")) is True
 
-    class Fake429:
-        response = SimpleNamespace(status_code=429)
+    # Simulate a 429 response using httpx.HTTPStatusError
+    req = httpx.Request("GET", "https://api.raindrop.io/rest/v1/test")
+    resp = httpx.Response(429, request=req)
+    assert _is_transient(httpx.HTTPStatusError("rate limited", request=req, response=resp)) is True
 
-    assert _is_transient(Fake429()) is True
-
-    class Fake200:
-        response = SimpleNamespace(status_code=200)
-
-    assert _is_transient(Fake200()) is False
+    # Simulate a 200 response (not transient)
+    resp200 = httpx.Response(200, request=req)
+    assert _is_transient(httpx.HTTPStatusError("ok", request=req, response=resp200)) is False
     assert _is_transient(ValueError()) is False
