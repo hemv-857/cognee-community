@@ -74,7 +74,16 @@ class _Messages:
         self._svc = svc
 
     def list(self, **kwargs):
-        return _Request({"messages": [{"id": mid} for mid in self._svc.message_ids]})
+        labels = set(kwargs.get("labelIds") or [])
+        return _Request(
+            {
+                "messages": [
+                    {"id": mid}
+                    for mid in self._svc.message_ids
+                    if labels.issubset(self._svc.messages[mid].get("labelIds", []))
+                ]
+            }
+        )
 
     def get(self, *, userId, id, format):  # noqa: N803 - mirror Gmail API kwarg names
         if id in self._svc.get_errors:
@@ -371,6 +380,15 @@ def test_gmail_source_resource_is_configured_for_merge_and_hard_delete():
     assert columns["_deleted"].get("hard_delete") is True
 
 
+def test_gmail_source_refuses_core_without_safe_empty_cleanup(monkeypatch):
+    pytest.importorskip("dlt")
+    from cognee.tasks.ingestion import dlt_utils
+
+    monkeypatch.setattr(dlt_utils, "DOCUMENT_SYNC_VERSION", 0)
+    with pytest.raises(RuntimeError, match="table-scoped"):
+        gmail_source(service=object())
+
+
 def test_gmail_source_requires_dlt(monkeypatch):
     # Simulate dlt being absent: the factory should raise a helpful ImportError.
     import builtins
@@ -407,7 +425,11 @@ def test_e2e_dlt_merge_hard_delete_removes_deleted_message(tmp_path):
             dataset_name="gmail_e2e",
             pipelines_dir=pipelines_dir,
         )
-        pipeline.run(gmail_source(service=service))
+        source = gmail_source(service=service)
+        pipeline.run(source)
+        assert source.cognee_sync_stats["failed"] == 0
+        assert source.cognee_sync_stats["scanned"] == (2 if service is backfill_svc else 0)
+        assert source.cognee_sync_stats["deleted"] == (0 if service is backfill_svc else 1)
         with pipeline.sql_client() as client:
             rows = client.execute_sql("SELECT id FROM gmail_messages ORDER BY id")
         return [row[0] for row in rows]
@@ -429,3 +451,36 @@ def test_e2e_dlt_merge_hard_delete_removes_deleted_message(tmp_path):
         },
     )
     assert sync(incremental_svc) == ["b"]
+
+
+def test_e2e_changing_labels_backfills_existing_messages(tmp_path):
+    """A new label must load old mail even when mailbox history is empty."""
+    dlt = pytest.importorskip("dlt")
+    pipeline = dlt.pipeline(
+        pipeline_name="gmail_label_selection",
+        destination=dlt.destinations.sqlalchemy(f"sqlite:///{tmp_path / 'gmail.db'}"),
+        dataset_name="gmail_labels",
+        pipelines_dir=str(tmp_path / "pipelines"),
+    )
+    service = FakeGmailService(
+        messages=[
+            _make_message("inbox", labels=["INBOX"]),
+            _make_message("project", labels=["Label_project"]),
+        ],
+        profile_history_id="500",
+        history_response={"history": [], "historyId": "500"},
+    )
+    pipeline.run(gmail_source(service=service, label_ids=["INBOX"]))
+    with pipeline.sql_client() as sql:
+        assert sql.execute_sql("SELECT id FROM gmail_messages") == [("inbox",)]
+
+    pipeline.run(gmail_source(service=service, label_ids=["Label_project"]))
+    with pipeline.sql_client() as sql:
+        assert sql.execute_sql("SELECT id FROM gmail_messages ORDER BY id") == [
+            ("inbox",),
+            ("project",),
+        ]
+
+    # Keeping the same selection takes the incremental path on the next run.
+    service.get_errors = {"project": 503}
+    pipeline.run(gmail_source(service=service, label_ids=["Label_project"]))

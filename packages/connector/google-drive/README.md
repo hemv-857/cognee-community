@@ -10,11 +10,12 @@ extraction) via cognee's self-describing content-column mechanism.
 
 ## Requirements
 
-> **This connector requires a cognee release that ships "document-mode"** — i.e.
-> `cognee.tasks.ingestion.dlt_utils.CONTENT_COLUMN_HINT_ATTR` and the `resolve_dlt_sources`
-> routing that reads it. **This is not in cognee 1.3.0.** The `cognee==` pin in
-> `pyproject.toml` is a placeholder; set it to the first release that includes document-mode
-> before publishing.
+Requires a Cognee build with
+`cognee.tasks.ingestion.dlt_utils.DOCUMENT_SYNC_VERSION >= 1`. This guarantees
+table-scoped document cleanup and deletion of the final document in a source.
+The factory refuses older builds rather than risking cross-folder data loss.
+Until that core change is released, install the matching core checkout alongside
+this package; update the release dependency pin before publishing.
 
 ## Install
 
@@ -33,7 +34,7 @@ from cognee_community_connector_google_drive import google_drive_source
 await cognee.remember(
     google_drive_source(folder_id="<folder id from the Drive URL>"),
     dataset_name="my_drive_folder",
-    primary_key="file_id",
+    primary_key="id",
     write_disposition="merge",  # incremental upsert by file id
     max_rows_per_table=0,  # folders often exceed the default 50-row cap
 )
@@ -52,10 +53,15 @@ See `examples/example.py` for the full flow.
 Incremental sync uses the Drive Changes API page token (persisted in dlt's per-resource state):
 the first run captures a start token + does a full folder listing; later runs emit only
 added/changed files plus hard-delete tombstones for removed/trashed files. Deletes are emitted
-with the `deleted` hard-delete marker; dlt drops them on `merge` and cognee's `orphan_cleanup`
+with the `_deleted` hard-delete marker; dlt drops them on `merge` and cognee's `orphan_cleanup`
 purges them from the graph, vector, and relational stores. Google Docs/Sheets export to
 text/CSV, PDFs are parsed with cognee's core `pypdf`, and plain text/markdown/CSV download as-is;
 an unparseable file is skipped with a warning.
+
+When syncing multiple folders into one dataset, assign each a stable, distinct
+`resource_name`. It isolates both the Changes API cursor and cleanup scope.
+Previously ingested documents without a table provenance stamp are retained
+conservatively; explicitly clear and re-sync the dataset to rebuild legacy data.
 
 ## Setup
 

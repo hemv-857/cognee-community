@@ -45,7 +45,7 @@ class _FakeFiles:
     def __init__(self, service):
         self._service = service
 
-    def list(self, q, fields, pageSize, pageToken=None):
+    def list(self, q, fields, pageSize, pageToken=None, **kwargs):
         import re
 
         folder_id = re.search(r"'([^']+)' in parents", q).group(1)
@@ -54,7 +54,7 @@ class _FakeFiles:
         files = [m for m in self._service.files_by_folder.get(folder_id, []) if not m["trashed"]]
         return _Req({"files": files})
 
-    def get(self, fileId, fields):
+    def get(self, fileId, fields, supportsAllDrives):
         return _Req(self._service.file_by_id[fileId])
 
 
@@ -62,10 +62,10 @@ class _FakeChanges:
     def __init__(self, service):
         self._service = service
 
-    def getStartPageToken(self):
+    def getStartPageToken(self, supportsAllDrives, driveId=None):
         return _Req({"startPageToken": self._service.start_token})
 
-    def list(self, pageToken, fields):
+    def list(self, pageToken, fields, **kwargs):
         return _Req(
             self._service.changes_by_token.get(
                 pageToken, {"changes": [], "newStartPageToken": pageToken}

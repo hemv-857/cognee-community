@@ -19,6 +19,13 @@ DOC_MIME = "application/vnd.google-apps.document"
 PDF_MIME = "application/pdf"
 
 
+def test_refuses_core_without_table_scoped_cleanup(monkeypatch):
+    pytest.importorskip("dlt")
+    monkeypatch.setattr(gd_source.dlt_utils, "DOCUMENT_SYNC_VERSION", 0)
+    with pytest.raises(RuntimeError, match="table-scoped"):
+        gd_source.google_drive_source(folder_id="root", service=object())
+
+
 class FakeHttpError(Exception):
     class _Resp:
         def __init__(self, status):
@@ -45,8 +52,32 @@ class _FakeFilesResource:
     def __init__(self, service):
         self._service = service
 
-    def list(self, q, fields, pageSize, pageToken=None):
+    def list(
+        self,
+        q,
+        fields,
+        pageSize,
+        pageToken=None,
+        *,
+        supportsAllDrives,
+        includeItemsFromAllDrives,
+        corpora=None,
+        driveId=None,
+    ):
+        assert supportsAllDrives is True
+        assert includeItemsFromAllDrives is True
         self._service.list_calls.append(q)
+        if driveId:
+            assert corpora == "drive"
+            return _FakeRequest(
+                {
+                    "files": [
+                        meta
+                        for meta in self._service.file_by_id.values()
+                        if meta.get("driveId") == driveId and not meta.get("trashed")
+                    ]
+                }
+            )
         match = re.search(r"'([^']+)' in parents", q)
         folder_id = match.group(1)
         if "mimeType=" in q:
@@ -59,7 +90,8 @@ class _FakeFilesResource:
         ]
         return _FakeRequest({"files": files})
 
-    def get(self, fileId, fields):
+    def get(self, fileId, fields, supportsAllDrives):
+        assert supportsAllDrives is True
         self._service.get_calls.append(fileId)
         meta = self._service.file_by_id.get(fileId)
         if meta is None:
@@ -71,10 +103,15 @@ class _FakeChangesResource:
     def __init__(self, service):
         self._service = service
 
-    def getStartPageToken(self):
+    def getStartPageToken(self, supportsAllDrives, driveId=None):
+        assert supportsAllDrives is True
+        self._service.start_drive_ids.append(driveId)
         return _FakeRequest({"startPageToken": self._service.start_token})
 
-    def list(self, pageToken, fields):
+    def list(self, pageToken, fields, supportsAllDrives, includeItemsFromAllDrives, driveId=None):
+        assert supportsAllDrives is True
+        assert includeItemsFromAllDrives is True
+        self._service.change_drive_ids.append(driveId)
         return _FakeRequest(self._service.changes_by_token[pageToken])
 
 
@@ -87,6 +124,8 @@ class FakeDriveService:
         self.changes_by_token = {}
         self.get_calls = []
         self.list_calls = []
+        self.start_drive_ids = []
+        self.change_drive_ids = []
 
     def files(self):
         return _FakeFilesResource(self)
@@ -251,7 +290,7 @@ def test_drive_api_error_raises_instead_of_deleting_everything(fake_content_extr
     class BrokenChangesService(FakeDriveService):
         def changes(self):
             class _Broken:
-                def list(self, pageToken, fields):
+                def list(self, pageToken, fields, **kwargs):
                     return _FakeRequest(error=RuntimeError("simulated network failure"))
 
             return _Broken()
@@ -265,3 +304,87 @@ def test_drive_api_error_raises_instead_of_deleting_everything(fake_content_extr
     # State must be untouched — a failed run must not look like "everything
     # was deleted" to the caller (dlt then rolls back and retries this token).
     assert state == {"page_token": "t0"}
+
+
+def test_shared_drive_backfill_and_incremental_changes_use_the_same_corpus():
+    shared = dict(_file_meta("shared-file", parents=("nested",)), driveId="team-drive")
+    other = dict(_file_meta("other-file"), driveId="other-drive")
+    service = FakeDriveService(
+        files_by_folder={},
+        file_by_id={"shared-file": shared, "other-file": other},
+        start_token="t0",
+    )
+    config = _config(folder_id="team-drive", shared_drive_id="team-drive")
+    state = {}
+    assert [row["id"] for row in gd_source._iter_rows(service, config, state)] == ["shared-file"]
+    assert service.start_drive_ids == ["team-drive"]
+    assert service.list_calls == ["trashed=false"]
+
+    service.changes_by_token["t0"] = {
+        "changes": [{"fileId": "shared-file"}],
+        "newStartPageToken": "t1",
+    }
+    updated = list(gd_source._iter_rows(service, config, state))
+    assert updated[0]["id"] == "shared-file"
+    assert updated[0]["_deleted"] is False
+    assert service.change_drive_ids == ["team-drive"]
+
+    service.changes_by_token["t1"] = {
+        "changes": [{"fileId": "shared-file", "removed": True}],
+        "newStartPageToken": "t2",
+    }
+    assert list(gd_source._iter_rows(service, config, state)) == [
+        {"id": "shared-file", "_deleted": True}
+    ]
+    assert state["page_token"] == "t2"
+
+
+def test_drive_membership_events_without_a_file_id_do_not_break_sync():
+    service = FakeDriveService(files_by_folder={}, file_by_id={})
+    service.changes_by_token["t0"] = {
+        "changes": [{"removed": True}],
+        "newStartPageToken": "t1",
+    }
+    state = {"page_token": "t0"}
+    assert list(gd_source._iter_rows(service, _config(), state)) == []
+    assert state["page_token"] == "t1"
+
+
+def test_file_diagnostics_report_reasons_and_retry_failed_extraction(monkeypatch):
+    files = [
+        _file_meta("good"),
+        _file_meta("unsupported", mime_type="image/png"),
+        dict(_file_meta("large"), size=str(30 * 1024 * 1024)),
+        _file_meta("empty"),
+        _file_meta("failed"),
+    ]
+    service = FakeDriveService(
+        files_by_folder={"root": files},
+        file_by_id={item["id"]: item for item in files},
+        start_token="t0",
+    )
+    content = {"good": "hello", "empty": " ", "failed": None}
+    monkeypatch.setattr(gd_source, "extract_file_content", lambda _, fid, *_args: content[fid])
+    state, stats = {}, {}
+    rows = list(gd_source._iter_rows(service, _config(), state, stats))
+    assert [row["id"] for row in rows] == ["good"]
+    assert stats == {
+        "scanned": 5,
+        "skipped": 3,
+        "failed": 1,
+        "deleted": 0,
+        "skipped_unsupported_type": 1,
+        "skipped_too_large": 1,
+        "skipped_empty_content": 1,
+        "failed_content_extraction": 1,
+    }
+    assert "page_token" not in state
+
+    content["failed"] = "recovered"
+    assert {row["id"] for row in gd_source._iter_rows(service, _config(), state, stats)} == {
+        "good",
+        "failed",
+    }
+    assert stats["failed"] == 0
+    assert stats["scanned"] == 5
+    assert state["page_token"] == "t0"

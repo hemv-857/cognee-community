@@ -47,7 +47,7 @@ class _FakeFilesResource:
     def __init__(self, service):
         self._service = service
 
-    def list(self, q, fields, pageSize, pageToken=None):
+    def list(self, q, fields, pageSize, pageToken=None, **kwargs):
         import re
 
         folder_id = re.search(r"'([^']+)' in parents", q).group(1)
@@ -56,7 +56,7 @@ class _FakeFilesResource:
         files = [m for m in self._service.files_by_folder.get(folder_id, []) if not m["trashed"]]
         return _FakeRequest({"files": files})
 
-    def get(self, fileId, fields):
+    def get(self, fileId, fields, supportsAllDrives):
         meta = self._service.file_by_id.get(fileId)
         if meta is None:
             return _FakeRequest(error=_FakeHttpError())
@@ -67,10 +67,10 @@ class _FakeChangesResource:
     def __init__(self, service):
         self._service = service
 
-    def getStartPageToken(self):
+    def getStartPageToken(self, supportsAllDrives, driveId=None):
         return _FakeRequest({"startPageToken": self._service.start_token})
 
-    def list(self, pageToken, fields):
+    def list(self, pageToken, fields, **kwargs):
         return _FakeRequest(self._service.changes_by_token[pageToken])
 
 
@@ -104,11 +104,32 @@ def _file_meta(file_id, name=None):
 @pytest_asyncio.fixture
 async def clean_environment(tmp_path, monkeypatch):
     pytest.importorskip("dlt")
+    from dlt.common.configuration.container import Container
+    from dlt.common.pipeline import PipelineContext
+
+    Container()[PipelineContext].deactivate()
 
     # add() never calls the LLM (no cognify()), but cognee's startup
     # connection check would still try to reach one — skip it so this test
     # needs no live credentials.
     monkeypatch.setenv("COGNEE_SKIP_CONNECTION_TEST", "true")
+    monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt"))
+    monkeypatch.setenv("PIPELINES_DIR", str(tmp_path / "dlt" / "pipelines"))
+
+    from cognee.context_global_variables import graph_db_config, vector_db_config
+    from cognee.infrastructure.databases.graph.get_graph_engine import _create_graph_engine
+    from cognee.infrastructure.databases.relational.create_relational_engine import (
+        create_relational_engine,
+    )
+    from cognee.infrastructure.databases.vector.create_vector_engine import _create_vector_engine
+    from cognee.tasks.ingestion.get_dlt_destination import get_dlt_destination
+
+    _create_graph_engine.cache_clear()
+    _create_vector_engine.cache_clear()
+    create_relational_engine.cache_clear()
+    get_dlt_destination.cache_clear()
+    graph_db_config.set(None)
+    vector_db_config.set(None)
 
     cognee.config.data_root_directory(str(tmp_path / "data"))
     cognee.config.system_root_directory(str(tmp_path / "system"))
@@ -119,6 +140,7 @@ async def clean_environment(tmp_path, monkeypatch):
 
     yield
 
+    Container()[PipelineContext].deactivate()
     await cognee.prune.prune_data()
     await cognee.prune.prune_system(metadata=True)
 
@@ -143,8 +165,7 @@ async def _dlt_sourced_data(dataset_name: str):
     return [
         d
         for d in all_data
-        if isinstance(d.external_metadata, dict)
-        and d.external_metadata.get("source") == "google_drive"
+        if isinstance(d.system_metadata, dict) and d.system_metadata.get("source") == "google_drive"
     ]
 
 
@@ -161,6 +182,56 @@ async def _remember_drive(**overrides):
     }
     kwargs.update(overrides)
     await cognee.add(source, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_separate_folder_syncs_preserve_each_others_documents(clean_environment, monkeypatch):
+    file_a = {**_file_meta("fileA"), "parents": ["folderA"]}
+    file_b = {**_file_meta("fileB"), "parents": ["folderB"]}
+    service = _FakeDriveService(
+        files_by_folder={"folderA": [file_a], "folderB": [file_b]},
+        file_by_id={"fileA": file_a, "fileB": file_b},
+    )
+    _patch_drive(
+        monkeypatch, service, {"fileA": "Alice works at Acme.", "fileB": "Bob works at Beta."}
+    )
+    for folder in ("folderA", "folderB"):
+        await cognee.add(
+            google_drive_source(
+                folder_id=folder, resource_name=f"drive_{folder.lower()}", service=service
+            ),
+            dataset_name=DATASET_NAME,
+            primary_key="id",
+            write_disposition="merge",
+            max_rows_per_table=0,
+        )
+    records = await _dlt_sourced_data(DATASET_NAME)
+    assert {record.system_metadata["external_id"] for record in records} == {"fileA", "fileB"}
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_last_file_forgets_the_document(clean_environment, monkeypatch):
+    file_a = _file_meta("fileA")
+    service = _FakeDriveService(files_by_folder={"root": [file_a]}, file_by_id={"fileA": file_a})
+    _patch_drive(monkeypatch, service, {"fileA": "Alice works at Acme."})
+    await _remember_drive()
+    assert len(await _dlt_sourced_data(DATASET_NAME)) == 1
+    service.changes_by_token["t0"] = {
+        "changes": [],
+        "newStartPageToken": "t1",
+    }
+    await _remember_drive()
+    assert len(await _dlt_sourced_data(DATASET_NAME)) == 1
+    # A failed extraction must not look like an authoritative empty snapshot.
+    with pytest.raises(Exception, match="failed to list changes"):
+        await _remember_drive()
+    assert len(await _dlt_sourced_data(DATASET_NAME)) == 1
+    service.changes_by_token["t1"] = {
+        "changes": [{"fileId": "fileA", "removed": True}],
+        "newStartPageToken": "t2",
+    }
+    await _remember_drive()
+    assert await _dlt_sourced_data(DATASET_NAME) == []
 
 
 @pytest.mark.asyncio
@@ -187,7 +258,7 @@ async def test_incremental_resync_and_deletion_propagate(clean_environment, monk
 
     initial_data = await _dlt_sourced_data(DATASET_NAME)
     assert len(initial_data) == 3
-    initial_ids_by_file = {d.external_metadata["external_id"]: d.id for d in initial_data}
+    initial_ids_by_file = {d.system_metadata["external_id"]: d.id for d in initial_data}
     assert set(initial_ids_by_file) == {"fileA", "fileB", "fileC"}
 
     # Document rows are tagged source="google_drive" (not "dlt"), so is_dlt_sourced()
@@ -196,7 +267,7 @@ async def test_incremental_resync_and_deletion_propagate(clean_environment, monk
     # ingest but contribute nothing to the graph.
     from cognee.tasks.ingestion.dlt_utils import is_dlt_sourced
 
-    assert all(not is_dlt_sourced(d.external_metadata) for d in initial_data)
+    assert all(not is_dlt_sourced(d.system_metadata) for d in initial_data)
 
     # --- Incremental run: fileA content changes, fileB is deleted from Drive,
     # and fileC is left untouched (not in the change feed).
@@ -219,7 +290,7 @@ async def test_incremental_resync_and_deletion_propagate(clean_environment, monk
     await _remember_drive()
 
     final_data = await _dlt_sourced_data(DATASET_NAME)
-    final_by_file = {d.external_metadata["external_id"]: d for d in final_data}
+    final_by_file = {d.system_metadata["external_id"]: d for d in final_data}
 
     # fileB was removed from Drive -> forgotten via orphan_cleanup.
     assert "fileB" not in final_by_file

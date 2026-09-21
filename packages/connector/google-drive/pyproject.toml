@@ -3,7 +3,7 @@ name = "cognee-community-connector-google-drive"
 version = "0.1.0"
 description = "Google Drive data-source connector for cognee — sync a Drive folder into memory (incremental + forget-on-delete)"
 readme = "README.md"
-requires-python = ">=3.11,<=3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     # Requires cognee "document-mode" (DOCUMENT_SOURCE_ATTR + resolve_dlt_sources
     # routing), first shipped in cognee 1.4.0.

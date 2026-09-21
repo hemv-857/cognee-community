@@ -7,8 +7,15 @@ It exposes a `dlt` source you hand straight to `cognee.remember(...)`, so it reu
 cognee's existing DLT ingestion path (`resolve_dlt_sources` → `ingest_dlt_source` →
 `orphan_cleanup`). That gives you **incremental re-sync** (Gmail `historyId` cursor,
 `merge` write disposition) and **forget-on-delete** (messages you delete/trash in Gmail
-are removed from memory on the next sync) with no parallel ingestion path and no changes
-to core cognee.
+are removed from memory on the next sync) without a parallel ingestion path.
+
+## Requirements
+
+Requires a Cognee build with
+`cognee.tasks.ingestion.dlt_utils.DOCUMENT_SYNC_VERSION >= 1`, including scoped
+document cleanup and deletion of the final message. The factory refuses older
+builds. Until that core change is released, use the matching core checkout and
+update the release dependency pin before publishing this package.
 
 ## Install
 
@@ -41,6 +48,11 @@ answer = await cognee.search(
 
 Re-running `remember(...)` with the same dataset syncs only the delta and forgets any
 mail removed from Gmail. See `examples/example.py` for the full two-sync demo.
+
+Changing `label_ids` starts a backfill for the new selection, including messages
+that predate the previous sync. Reordering the same labels keeps the incremental
+cursor. Changing the selection does not purge previously indexed mail; use
+`cognee.forget(dataset="gmail_inbox")` to clear the dataset before replacing its scope.
 
 > **`write_disposition="merge"` is mandatory.** The add pipeline defaults to `"replace"`
 > (drop + reload each run), which would wipe the whole synced inbox on the second sync.

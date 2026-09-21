@@ -32,7 +32,8 @@ class _FakeFiles:
             raise RuntimeError("export failed")
         return _FakeRequest(self._export_result)
 
-    def get_media(self, fileId):
+    def get_media(self, fileId, supportsAllDrives):
+        assert supportsAllDrives is True
         if self._raise_error:
             raise RuntimeError("download failed")
         return _FakeRequest(self._media_result)

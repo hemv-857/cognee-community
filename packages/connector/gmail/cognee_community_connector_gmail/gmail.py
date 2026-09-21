@@ -63,6 +63,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from cognee.shared.logging_utils import get_logger
+from cognee.tasks.ingestion import dlt_utils
 from cognee.tasks.ingestion.dlt_utils import DOCUMENT_SOURCE_ATTR
 
 logger = get_logger("gmail_connector")
@@ -260,7 +261,7 @@ def _list_message_ids(
             return
 
 
-def _get_message(service: Any, message_id: str) -> dict | None:
+def _get_message(service: Any, message_id: str, stats: dict[str, int] | None = None) -> dict | None:
     """Fetch a full message; return None only if it is genuinely gone (404/410).
 
     A transient failure (5xx / rate-limit / network) is re-raised rather than
@@ -269,13 +270,20 @@ def _get_message(service: Any, message_id: str) -> dict | None:
     message from memory. Re-raising instead aborts the sync before the cursor
     advances, so the next run safely retries from the same point.
     """
+    if stats is None:
+        stats = {}
+    stats["scanned"] = stats.get("scanned", 0) + 1
     try:
         return service.users().messages().get(userId="me", id=message_id, format="full").execute()
     except Exception as exc:
         # Trust only the structured HTTP status: str(exc) embeds the request
         # URL, and a hex message id can spuriously contain "404"/"410".
         if getattr(getattr(exc, "resp", None), "status", None) in (404, 410):
+            stats["skipped"] = stats.get("skipped", 0) + 1
+            stats["skipped_unavailable"] = stats.get("skipped_unavailable", 0) + 1
             return None
+        stats["failed"] = stats.get("failed", 0) + 1
+        stats["failed_message_fetch"] = stats.get("failed_message_fetch", 0) + 1
         raise
 
 
@@ -299,6 +307,7 @@ def full_backfill(
     *,
     label_ids: list[str] | None = None,
     max_results: int | None = None,
+    stats: dict[str, int] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield every matching message and record the incremental baseline.
 
@@ -310,7 +319,7 @@ def full_backfill(
 
     count = 0
     for message_id in _list_message_ids(service, label_ids, max_results):
-        message = _get_message(service, message_id)
+        message = _get_message(service, message_id, stats)
         if message is None:
             continue
         count += 1
@@ -326,6 +335,7 @@ def incremental_fetch(
     state: dict,
     *,
     label_ids: list[str] | None = None,
+    stats: dict[str, int] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield only changes since ``state['last_history_id']`` via the History API.
 
@@ -341,7 +351,7 @@ def incremental_fetch(
     start_history_id = state.get("last_history_id")
     if not start_history_id:
         # No cursor yet — caller should have backfilled. Be defensive.
-        yield from full_backfill(service, state, label_ids=label_ids)
+        yield from full_backfill(service, state, label_ids=label_ids, stats=stats)
         return
 
     page_token = None
@@ -372,7 +382,7 @@ def incremental_fetch(
                     start_history_id,
                 )
                 state.pop("last_history_id", None)
-                yield from full_backfill(service, state, label_ids=label_ids)
+                yield from full_backfill(service, state, label_ids=label_ids, stats=stats)
                 return
             raise
 
@@ -407,7 +417,7 @@ def incremental_fetch(
 
     added_count = 0
     for msg_id in seen_added:
-        message = _get_message(service, msg_id)
+        message = _get_message(service, msg_id, stats)
         if message is None:
             # Genuinely gone (404/410) — treat as a deletion.
             seen_deleted.add(msg_id)
@@ -432,6 +442,8 @@ def incremental_fetch(
         yield parse_message(message)
 
     for msg_id in seen_deleted:
+        if stats is not None:
+            stats["deleted"] = stats.get("deleted", 0) + 1
         yield _deleted_row(msg_id)
 
     state["last_history_id"] = str(newest_history_id)
@@ -478,6 +490,14 @@ def gmail_source(
             "(the gmail extra bundles dlt)."
         ) from exc
 
+    if getattr(dlt_utils, "DOCUMENT_SYNC_VERSION", 0) < 1:
+        raise RuntimeError(
+            "Gmail sync requires a Cognee build with table-scoped DLT document cleanup. "
+            "Upgrade Cognee so deleting the final message also removes its stored content."
+        )
+
+    stats: dict[str, int] = {}
+
     @dlt.resource(
         name="gmail_messages",
         primary_key="id",
@@ -488,22 +508,34 @@ def gmail_source(
         columns={"_deleted": {"data_type": "bool", "hard_delete": True}},
     )
     def gmail_messages():
+        stats.clear()
+        stats.update(scanned=0, skipped=0, failed=0, deleted=0)
         client = service or build_gmail_service(credentials_path, token_path)
         resource_state = dlt.current.resource_state()
+        # A history cursor describes changes after a point in time, not the
+        # contents of a newly selected label. Backfill when the selection
+        # changes so older messages entering the scope are not lost. Sorting
+        # avoids a backfill when the picker only reorders the same labels.
+        scope = sorted(set(label_ids or []))
+        same_scope = resource_state.get("label_scope") == scope
 
-        if resource_state.get("last_history_id"):
-            yield from incremental_fetch(client, resource_state, label_ids=label_ids)
+        if same_scope and resource_state.get("last_history_id"):
+            yield from incremental_fetch(client, resource_state, label_ids=label_ids, stats=stats)
         else:
             yield from full_backfill(
                 client,
                 resource_state,
                 label_ids=label_ids,
                 max_results=max_results,
+                stats=stats,
             )
+        # Do not persist the new scope if extraction fails midway through.
+        resource_state["label_scope"] = scope
 
     resource = gmail_messages()
     # Gmail rows are prose documents, not a relational manifest. Without this
     # marker Cognee would ingest the DLT table as one structured object and
     # never run normal document cognification or orphan cleanup.
     setattr(resource, DOCUMENT_SOURCE_ATTR, "gmail")
+    resource.cognee_sync_stats = stats
     return resource

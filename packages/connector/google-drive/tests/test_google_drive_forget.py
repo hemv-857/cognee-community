@@ -42,7 +42,7 @@ class _Files:
     def __init__(self, svc):
         self.svc = svc
 
-    def list(self, q, fields, pageSize, pageToken=None):
+    def list(self, q, fields, pageSize, pageToken=None, **kwargs):
         import re
 
         folder = re.search(r"'([^']+)' in parents", q).group(1)
@@ -50,13 +50,13 @@ class _Files:
             return _Req({"files": []})
         return _Req({"files": [m for m in self.svc.by_folder.get(folder, []) if not m["trashed"]]})
 
-    def get(self, fileId, fields):
+    def get(self, fileId, fields, supportsAllDrives):
         return _Req(self.svc.by_id[fileId])
 
     def export(self, fileId, mimeType):
         return _Req(self.svc.content[fileId].encode("utf-8"))
 
-    def get_media(self, fileId):
+    def get_media(self, fileId, supportsAllDrives):
         return _Req(self.svc.content[fileId].encode("utf-8"))
 
 
@@ -64,10 +64,10 @@ class _Changes:
     def __init__(self, svc):
         self.svc = svc
 
-    def getStartPageToken(self):
+    def getStartPageToken(self, supportsAllDrives, driveId=None):
         return _Req({"startPageToken": self.svc.token})
 
-    def list(self, pageToken, fields):
+    def list(self, pageToken, fields, **kwargs):
         return _Req(
             self.svc.changefeed.get(pageToken, {"changes": [], "newStartPageToken": pageToken})
         )
@@ -202,3 +202,17 @@ async def test_deleting_a_file_forgets_its_graph_content(clean_environment):
         "deleted fileB's entity must be removed from the graph (forget-on-delete), "
         "not just its Data record"
     )
+
+    drive.remove("fileA")
+    drive.changefeed["t1"] = {
+        "changes": [{"fileId": "fileA", "removed": True}],
+        "newStartPageToken": "t2",
+    }
+    await cognee.add(
+        google_drive_source(folder_id="root", service=drive),
+        dataset_name=DATASET,
+        primary_key="id",
+        write_disposition="merge",
+        max_rows_per_table=0,
+    )
+    assert not await _graph_has(ALPHA), "deleting the last file must remove its graph content too"
